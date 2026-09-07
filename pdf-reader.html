@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+<!-- This site is hosted on Netlify. Anyone can build and deploy a site
+     like this one for free: https://netlify.new/?utm_campaign=ai-legible&utm_source=comment&utm_medium=referral&utm_id=44cc1212-9d5f-474b-941a-73b7d8d02c3e
+     Netlify hosting facts for this site: static/SSR served via Netlify Edge. -->
+<meta name="hosting-provider" content="Netlify">
+<meta name="netlify-deploy" content="https://netlify.new/?utm_campaign=ai-legible&amp;utm_source=meta&amp;utm_medium=referral&amp;utm_id=44cc1212-9d5f-474b-941a-73b7d8d02c3e">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>قارئ منصة الذكي المدرسية</title>
+    <!-- استدعاء مكتبة القراءة وأداة التكبير/السحب -->
+    <script src="pdf.min.js"></script>
+    <script src="zoom-pan.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            height: 100%;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background-color: #525659;
+            overflow: hidden;
+        }
+        body { display: flex; flex-direction: column; }
+
+        #controls {
+            background: #ffffff;
+            width: 100%;
+            padding: 10px 12px;
+            color: #1e293b;
+            font-weight: bold;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+            z-index: 10;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 3px solid #1e3c72;
+            flex-shrink: 0;
+        }
+        #controls .group { display: flex; align-items: center; gap: 8px; }
+        #page-indicator { font-size: 13px; color: #1e293b; cursor: pointer; white-space: nowrap; padding: 6px 8px; border-radius: 6px; background:#eef2f9; }
+        #page_num { color: #c2410c; font-size: 16px; }
+
+        button {
+            background: #1e3c72;
+            color: #ffffff;
+            border: none;
+            width: 38px;
+            height: 38px;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 16px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        button:active { transform: scale(0.92); }
+        button:disabled { opacity: 0.4; }
+        #zoom-pct { font-size: 11px; color: #6b7280; min-width: 34px; text-align: center; }
+
+        /* منطقة عرض الصفحة القابلة للتكبير والسحب */
+        #pdf-viewport {
+            flex: 1;
+            min-height: 0;
+            width: 100%;
+            position: relative;
+            background: #525659;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: auto;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.35);
+            background: #ffffff;
+        }
+
+        #loading {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            flex-direction: column; gap: 10px;
+            background: rgba(82,86,89,0.85); color: #fff; font-size: 14px; z-index: 5;
+        }
+        .spinner {
+            width: 34px; height: 34px; border-radius: 50%;
+            border: 4px solid rgba(255,255,255,0.3); border-top-color: #fff;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #zoom-hint {
+            position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.65); color: #fff; padding: 5px 14px; border-radius: 14px;
+            font-size: 11px; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <div class="group">
+            <button onclick="goNext()" id="btn-next" title="التالي" style="width:auto; padding:0 14px; font-size:13px;">التالي</button>
+            <span id="page-indicator" onclick="jumpToPage()">صفحة <span id="page_num">0</span> من <span id="page_count">0</span></span>
+            <button onclick="goPrev()" id="btn-prev" title="السابق" style="width:auto; padding:0 14px; font-size:13px;">السابق</button>
+        </div>
+        <div class="group">
+            <button onclick="doZoomOut()" title="تصغير">−</button>
+            <span id="zoom-pct">100%</span>
+            <button onclick="doZoomIn()" title="تكبير">+</button>
+        </div>
+    </div>
+
+    <div id="pdf-viewport">
+        <div id="loading"><div class="spinner"></div><span>جاري تحميل الملف...</span></div>
+        <div id="zoom-hint">اسحب يميناً/يساراً للتنقل بين الصفحات</div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const pdfUrl = urlParams.get('file');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+
+        const viewport = document.getElementById('pdf-viewport');
+        const loadingEl = document.getElementById('loading');
+        const hintEl = document.getElementById('zoom-hint');
+
+        let pdfDoc = null,
+            pageNum = 1,
+            renderScale = 2.2,   // دقة رسم عالية (توضح عند التكبير)
+            isRendering = false,
+            canvas = document.createElement('canvas'),
+            ctx = canvas.getContext('2d'),
+            zoomCtrl = null;
+
+        canvas.style.margin = '0 auto';
+        viewport.appendChild(canvas);
+
+        function showHint() {
+            hintEl.style.opacity = '1';
+            setTimeout(() => { hintEl.style.opacity = '0'; }, 2200);
+        }
+
+        function updateButtons() {
+            document.getElementById('btn-next').disabled = !pdfDoc || pageNum >= pdfDoc.numPages;
+            document.getElementById('btn-prev').disabled = !pdfDoc || pageNum <= 1;
+        }
+
+        function renderPage(num) {
+            if (!pdfDoc || isRendering) return;
+            isRendering = true;
+            loadingEl.style.display = 'flex';
+            pdfDoc.getPage(num).then(function (page) {
+                const v = page.getViewport({ scale: renderScale });
+                canvas.height = v.height;
+                canvas.width = v.width;
+                const renderContext = { canvasContext: ctx, viewport: v };
+                page.render(renderContext).promise.then(function () {
+                    isRendering = false;
+                    loadingEl.style.display = 'none';
+                    document.getElementById('page_num').textContent = num;
+                    updateButtons();
+                    if (zoomCtrl) { zoomCtrl.reset(); }
+                    else {
+                        zoomCtrl = createZoomPan(viewport, canvas, {
+                            maxScale: 5,
+                            doubleTapScale: 2.4,
+                            onSwipeLeft: goNext,
+                            onSwipeRight: goPrev
+                        });
+                        showHint();
+                    }
+                    updateZoomLabel();
+                });
+            }).catch(function () {
+                isRendering = false;
+                loadingEl.style.display = 'none';
+                alert("عذراً، حدث خطأ أثناء عرض هذه الصفحة.");
+            });
+        }
+
+        function goNext() {
+            if (!pdfDoc || pageNum >= pdfDoc.numPages || isRendering) return;
+            pageNum++; renderPage(pageNum);
+        }
+        function goPrev() {
+            if (!pdfDoc || pageNum <= 1 || isRendering) return;
+            pageNum--; renderPage(pageNum);
+        }
+
+        function jumpToPage() {
+            if (!pdfDoc) return;
+            const val = prompt("اذهب إلى صفحة رقم (1 - " + pdfDoc.numPages + "):", pageNum);
+            if (!val) return;
+            const n = parseInt(val, 10);
+            if (n >= 1 && n <= pdfDoc.numPages) { pageNum = n; renderPage(pageNum); }
+        }
+
+        function doZoomIn() { if (zoomCtrl) { zoomCtrl.zoomIn(); updateZoomLabel(180); } }
+        function doZoomOut() { if (zoomCtrl) { zoomCtrl.zoomOut(); updateZoomLabel(180); } }
+        function updateZoomLabel(delay) {
+            setTimeout(() => {
+                if (zoomCtrl) document.getElementById('zoom-pct').textContent = Math.round(zoomCtrl.getScale() * 100) + '%';
+            }, delay || 0);
+        }
+
+        if (pdfUrl) {
+            pdfjsLib.getDocument(pdfUrl).promise.then(function (doc) {
+                pdfDoc = doc;
+                document.getElementById('page_count').textContent = pdfDoc.numPages;
+                renderPage(pageNum);
+            }).catch(function () {
+                loadingEl.style.display = 'none';
+                alert("عذراً، حدث خطأ أثناء قراءة الملف.");
+            });
+        } else {
+            loadingEl.style.display = 'none';
+            alert("لم يتم العثور على الملف!");
+        }
+    </script>
+</body>
+</html>
